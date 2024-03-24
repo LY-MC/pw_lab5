@@ -1,83 +1,178 @@
-import sys
-import urllib.parse
+from bs4 import BeautifulSoup
 import socket
+import ssl
 import re
+import sys
+import hashlib
+
+HTTPS_PORT = 443
+HTTP_PORT = 80
+http_cache = {}
 
 
-def make_request(url):
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        host = parsed_url.netloc
-        path = parsed_url.path if parsed_url.path else '/'
-        port = 443 if parsed_url.scheme == 'https' else 80
+def parse_url(url):
+    scheme_end = url.find("://")
+    if scheme_end != -1:
+        scheme = url[:scheme_end]
+        url = url[scheme_end + 3:]
+    else:
+        scheme = "http"
 
-        with socket.create_connection((host, port)) as sock:
-            sock.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
-            response = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
+    path_start = url.find("/")
+    if path_start != -1:
+        host_and_port = url[:path_start]
+        path = url[path_start:]
+    else:
+        host_and_port = url
+        path = "/"
+    host, port = parse_host_and_port(host_and_port)
+    return scheme, host, port, path
 
-        response_str = response.decode()
 
-        content_index = response_str.find('\r\n\r\n')
-        if content_index != -1:
-            response_str = response_str[content_index + 4:]
-            return response_str
+def parse_host_and_port(host_and_port):
+    port_start = host_and_port.find(":")
+    if port_start != -1:
+        host = host_and_port[:port_start]
+        port = int(host_and_port[port_start + 1:])
+    else:
+        host = host_and_port
+        port = HTTPS_PORT
+    return host, port
+
+
+def get_cache_key(url):
+    return hashlib.md5(url.encode('utf-8')).hexdigest()
+
+
+def cache_response(url, response):
+    cache_key = get_cache_key(url)
+    http_cache[cache_key] = response
+
+
+def get_cached_response(url):
+    cache_key = get_cache_key(url)
+    return http_cache.get(cache_key)
+
+
+def send_http_get_request(host, port, path, max_redirects=10):
+    url = f"{host}:{port}{path}"
+    cached_response = get_cached_response(url)
+    if cached_response:
+        print("Retrieved response from cache")
+        return cached_response
+    redirect_count = 0
+    while redirect_count < max_redirects:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((host, port))
+
+        if port == HTTPS_PORT:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+
+        request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        sock.sendall(request.encode())
+
+        response = b""
+        while True:
+            data = sock.recv(2048)
+            if not data:
+                break
+            response += data
+
+        sock.close()
+
+        headers, body = response.split(b"\r\n\r\n", 1)
+        headers_str = headers.decode('utf-8')
+        body_str = body.decode('utf-8', 'replace')
+
+        status_code = int(headers_str.split(' ')[1])
+        if 300 <= status_code < 400:
+            location_match = re.search(r"Location: (.+)", headers_str)
+            if location_match:
+                new_location = location_match.group(1).strip()
+                scheme, host, port, path = parse_url(new_location)
+                port = HTTPS_PORT if scheme == 'https' else HTTP_PORT
+                redirect_count += 1
+                continue
+            else:
+                break
         else:
-            raise Exception("No content found in the HTTP response")
-    except Exception as e:
-        return None
+            break
+
+    if redirect_count == max_redirects:
+        raise Exception(f"Stopped after {max_redirects} redirects. Last attempted URL: {path}")
+
+    cache_response(url, (headers_str, body_str))
+    return headers_str, body_str
 
 
-def clean_html(html_content):
-    content = re.sub(r'<style[\s\S]*?</style>', '', html_content)
-    content = re.sub(r'<[^>]*>', '', content)
-    return content
+def parse_html_body(html_body):
+    soup = BeautifulSoup(html_body, 'html.parser')
+    body_text = soup.body.get_text(separator='\n\n', strip=True)
+
+    return body_text.strip()
 
 
-def search_term(terms):
-    try:
-        search_url = f"https://www.google.com/search?q={urllib.parse.quote(' '.join(terms))}"
+def parse_search_response(html_body):
+    soup = BeautifulSoup(html_body, 'html.parser')
 
-        print("Search URL:", search_url)
+    final_results = []
+    index = 1
+    results = soup.find_all('div', class_='egMi0 kCrYT')
 
-        search_response = make_request(search_url)
+    while index <= len(results):
+        link = results[index - 1].findChild('a')
+        if link:
+            url = link.get('href')
+            if url.startswith('/url?q='):
+                url = url.split('/url?q=')[1].split('&sa=')[0]
+            desc = link.get_text()
 
-        if search_response:
-            print("Top 10 search results:")
-            print(search_response.split('\n')[:10])
+            final_results.append((index, desc, url))
+            index += 1
         else:
-            print("Failed to fetch search results.")
-    except Exception as e:
-        print(f"An error occurred during search: {e}")
+            break
+
+    return final_results
+
+
+def google_search(terms):
+    query = '+'.join(term.replace(" ", "+") for term in terms)
+    url = f"https://www.google.com/search?q={query}"
+    scheme, host, port, path = parse_url(url)
+
+    _, body = send_http_get_request(host, port, path)
+    return parse_search_response(body)
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] == '-h':
-        print("Usage: go2web -u <URL> | go2web -s <search-term>")
-        sys.exit(1)
+        print("Usage: go2web.py -u <URL>  # Fetch content from URL\n"
+              "       go2web.py -s <search-term>  # Search Google\n"
+              "       go2web.py -h  # Show usage information")
 
-    if sys.argv[1] == '-u':
+    elif sys.argv[1] == '-u':
         if len(sys.argv) < 3:
-            print("Please provide a URL after -u option")
+            print("Please provide a URL.")
             sys.exit(1)
         url = sys.argv[2]
-        response = make_request(url)
-        if response:
-            cleaned_content = clean_html(response)
-            print(cleaned_content)
-        else:
-            print("Failed to fetch content from the URL.")
+        scheme, host, port, path = parse_url(url)
+
+        _, body = send_http_get_request(host, port, path)
+        print(parse_html_body(body))
+
     elif sys.argv[1] == '-s':
         if len(sys.argv) < 3:
-            print("Please provide a search term after -s option")
+            print("Please provide search terms.")
             sys.exit(1)
-        search_term(' '.join(sys.argv[2:]))
+        terms = sys.argv[2:]
+        results = google_search(terms)
+        for index, desc, link in results:
+            print(f"{index}. {desc};\nAccess link: {link}\n\n")
     else:
-        print("Invalid option. Use -u for URL or -s for search term.")
+        print("Invalid option.")
         sys.exit(1)
 
 
