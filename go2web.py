@@ -1,3 +1,4 @@
+import sys
 from bs4 import BeautifulSoup
 import socket
 import ssl
@@ -167,41 +168,36 @@ def google_search(terms):
 
 
 def main():
-    while True:
-        option = input("Choose an option (-u <URL>, -s <search-term>, -h for help, or 'exit' to quit): ").strip()
+    if len(sys.argv) < 2 or sys.argv[1] == '-h':
+        print("Usage: go2web -u <URL>  # Fetch content from URL\n"
+              "       go2web -s <search-term>  # Search Google\n"
+              "       go2web -h  # Show usage information")
+        sys.exit(1)
 
-        if option.lower() == 'exit':
-            print("Exiting...")
-            break
-        elif option == '-h':
-            print("usage: go2web.py [-h] [-u URL] [-s search-term [search-term ...]]\n"
-                  "Fetch content from URL or search Google.\n\n"
-                  "options:\n"
-                  "  -h, --help            show this help message and exit\n"
-                  "  -u URL                Fetch content from URL\n"
-                  "  -s search-term [search-term ...]\n"
-                  "                        Search Google\n")
-        elif option.startswith('-u'):
-            url = option[3:].strip()
-            if url:
-                scheme, host, port, path = parse_url(url)
-                headers, body = send_http_get_request(host, port, path)
-                if 'application/json' in headers:
-                    print(body)
-                else:
-                    print(parse_html_body(body))
-            else:
-                print("Please provide a URL.")
-        elif option.startswith('-s'):
-            terms = option[3:].strip().split()
-            if terms:
-                results = google_search(terms)
-                for index, desc, link in results:
-                    print(f"{index}. {desc};\nAccess link: {link}\n\n")
-            else:
-                print("Please provide search terms.")
+    elif sys.argv[1] == '-u':
+        if len(sys.argv) < 3:
+            print("Please provide a URL.")
+            sys.exit(1)
+        url = sys.argv[2]
+        scheme, host, port, path = parse_url(url)
+
+        headers, body = send_http_get_request(host, port, path)
+        if 'application/json' in headers:
+            print(body)
         else:
-            print("Invalid option.")
+            print(parse_html_body(body))
+
+    elif sys.argv[1] == '-s':
+        if len(sys.argv) < 3:
+            print("Please provide search terms.")
+            sys.exit(1)
+        terms = sys.argv[2:]
+        results = google_search(terms)
+        for index, desc, link in results:
+            print(f"{index}. {desc};\nAccess link: {link}\n\n")
+    else:
+        print("Invalid option.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
